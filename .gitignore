@@ -101,3 +101,5 @@ tests/triangle-vulkan
 tests/window
 tests/windows
 
+# Mark was here!
+cmake-build-release
