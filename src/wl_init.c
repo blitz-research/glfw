@@ -23,8 +23,6 @@
 //    distribution.
 //
 //========================================================================
-// It is fine to use C99 in this file because it will not be built with VS
-//========================================================================
 
 #include "internal.h"
 
@@ -40,14 +38,15 @@
 #include <sys/timerfd.h>
 #include <unistd.h>
 #include <time.h>
+#include <assert.h>
 
 #include "wayland-client-protocol.h"
-#include "wayland-xdg-shell-client-protocol.h"
-#include "wayland-xdg-decoration-client-protocol.h"
-#include "wayland-viewporter-client-protocol.h"
-#include "wayland-relative-pointer-unstable-v1-client-protocol.h"
-#include "wayland-pointer-constraints-unstable-v1-client-protocol.h"
-#include "wayland-idle-inhibit-unstable-v1-client-protocol.h"
+#include "xdg-shell-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
+#include "relative-pointer-unstable-v1-client-protocol.h"
+#include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "idle-inhibit-unstable-v1-client-protocol.h"
 
 // NOTE: Versions of wayland-scanner prior to 1.17.91 named every global array of
 //       wl_interface pointers 'types', making it impossible to combine several unmodified
@@ -59,27 +58,27 @@
 #undef types
 
 #define types _glfw_xdg_shell_types
-#include "wayland-xdg-shell-client-protocol-code.h"
+#include "xdg-shell-client-protocol-code.h"
 #undef types
 
 #define types _glfw_xdg_decoration_types
-#include "wayland-xdg-decoration-client-protocol-code.h"
+#include "xdg-decoration-unstable-v1-client-protocol-code.h"
 #undef types
 
 #define types _glfw_viewporter_types
-#include "wayland-viewporter-client-protocol-code.h"
+#include "viewporter-client-protocol-code.h"
 #undef types
 
 #define types _glfw_relative_pointer_types
-#include "wayland-relative-pointer-unstable-v1-client-protocol-code.h"
+#include "relative-pointer-unstable-v1-client-protocol-code.h"
 #undef types
 
 #define types _glfw_pointer_constraints_types
-#include "wayland-pointer-constraints-unstable-v1-client-protocol-code.h"
+#include "pointer-constraints-unstable-v1-client-protocol-code.h"
 #undef types
 
 #define types _glfw_idle_inhibit_types
-#include "wayland-idle-inhibit-unstable-v1-client-protocol-code.h"
+#include "idle-inhibit-unstable-v1-client-protocol-code.h"
 #undef types
 
 static void wmBaseHandlePing(void* userData,
@@ -214,6 +213,22 @@ void libdecorHandleError(struct libdecor* context,
 static const struct libdecor_interface libdecorInterface =
 {
     libdecorHandleError
+};
+
+static void libdecorReadyCallback(void* userData,
+                                  struct wl_callback* callback,
+                                  uint32_t time)
+{
+    _glfw.wl.libdecor.ready = GLFW_TRUE;
+
+    assert(_glfw.wl.libdecor.callback == callback);
+    wl_callback_destroy(_glfw.wl.libdecor.callback);
+    _glfw.wl.libdecor.callback = NULL;
+}
+
+static const struct wl_callback_listener libdecorReadyListener =
+{
+    libdecorReadyCallback
 };
 
 // Create key code translation tables
@@ -775,19 +790,24 @@ int _glfwInitWayland(void)
     if (_glfw.wl.libdecor.handle)
     {
         _glfw.wl.libdecor.context = libdecor_new(_glfw.wl.display, &libdecorInterface);
-
-        // Allow libdecor to receive its globals before proceeding
         if (_glfw.wl.libdecor.context)
-            libdecor_dispatch(_glfw.wl.libdecor.context, 1);
+        {
+            // Perform an initial dispatch and flush to get the init started
+            libdecor_dispatch(_glfw.wl.libdecor.context, 0);
+
+            // Create sync point to "know" when libdecor is ready for use
+            _glfw.wl.libdecor.callback = wl_display_sync(_glfw.wl.display);
+            wl_callback_add_listener(_glfw.wl.libdecor.callback,
+                                     &libdecorReadyListener,
+                                     NULL);
+        }
     }
 
-#ifdef WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION
     if (wl_seat_get_version(_glfw.wl.seat) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
     {
         _glfw.wl.keyRepeatTimerfd =
             timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
     }
-#endif
 
     if (!_glfw.wl.wmBase)
     {
@@ -823,7 +843,14 @@ void _glfwTerminateWayland(void)
     _glfwTerminateOSMesa();
 
     if (_glfw.wl.libdecor.context)
+    {
+        // Allow libdecor to finish receiving all its requested globals
+        // and ensure the associated sync callback object is destroyed
+        while (!_glfw.wl.libdecor.ready)
+            _glfwWaitEventsWayland();
+
         libdecor_unref(_glfw.wl.libdecor.context);
+    }
 
     if (_glfw.wl.libdecor.handle)
     {
